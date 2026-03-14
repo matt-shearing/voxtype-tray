@@ -42,23 +42,17 @@ This tray app solves all of that with a native-feeling KDE experience.
 
 ## Installation
 
-### Quick Install
+### Arch Linux (AUR)
 
 ```bash
-# Copy the script
-cp voxtype-tray.py ~/.local/bin/voxtype-tray
-chmod +x ~/.local/bin/voxtype-tray
-
-# Create desktop entry
-cp voxtype-tray.desktop ~/.local/share/applications/
-
-# Autostart on login
-cp voxtype-tray.desktop ~/.config/autostart/
+yay -S voxtype-tray
 ```
+
+This installs the tray app, desktop entry, and autostart — it will launch automatically on your next login.
 
 ### KDE Plasma Wayland Setup
 
-If you're on KDE Plasma with Wayland, make sure you have the right dependencies:
+If you're on KDE Plasma with Wayland, you also need these:
 
 ```bash
 # dotool for text input (wtype does NOT work on KDE Wayland)
@@ -70,6 +64,20 @@ sudo pacman -S wl-clipboard
 # Input group for evdev hotkey access
 sudo usermod -aG input $USER
 # Log out and back in for group change to take effect
+```
+
+### Manual Install
+
+```bash
+# Copy the script
+cp voxtype-tray.py ~/.local/bin/voxtype-tray
+chmod +x ~/.local/bin/voxtype-tray
+
+# Create desktop entry
+cp voxtype-tray.desktop ~/.local/share/applications/
+
+# Autostart on login
+cp voxtype-tray.desktop ~/.config/autostart/
 ```
 
 ## Usage
