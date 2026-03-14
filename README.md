@@ -6,6 +6,11 @@ VoxType ships as a CLI daemon with a TOML config file. This app adds a proper GU
 
 ![Python](https://img.shields.io/badge/python-3.11+-blue) ![PyQt6](https://img.shields.io/badge/PyQt6-required-green) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
+<p align="center">
+  <img src="screenshots/output-tab.png" width="420" alt="Output settings">&nbsp;&nbsp;
+  <img src="screenshots/hotkey-tab.png" width="420" alt="Hotkey configuration">
+</p>
+
 ## Features
 
 - **System tray icon** with color-coded state (green=idle, red=recording, amber=transcribing, gray=stopped)
