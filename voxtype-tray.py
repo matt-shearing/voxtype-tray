@@ -772,12 +772,17 @@ class VoxTypeSettings(QMainWindow):
 
     def download_model(self):
         model = self.dl_model_combo.currentText()
+        dest = MODELS_DIR / f"ggml-{model}.bin"
+        if dest.exists():
+            QMessageBox.information(self, "Already Installed", f"Model '{model}' is already downloaded.")
+            return
+
         self.statusBar().showMessage(f"Downloading {model}... (this may take a moment)")
         QApplication.processEvents()
 
         proc = subprocess.run(
-            ["voxtype", "setup", "model", model],
-            capture_output=True, text=True, timeout=300,
+            ["voxtype", "setup", "--download", "--model", model, "--quiet"],
+            capture_output=True, text=True, timeout=600,
         )
 
         if proc.returncode == 0:
