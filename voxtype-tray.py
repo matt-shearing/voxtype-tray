@@ -15,8 +15,8 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QIcon, QFont, QAction, QPainter, QColor, QPixmap
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QTabWidget, QLabel, QComboBox, QSpinBox, QCheckBox, QPushButton,
-    QGroupBox, QFormLayout, QLineEdit, QSlider, QMessageBox,
+    QTabWidget, QLabel, QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox,
+    QPushButton, QGroupBox, QFormLayout, QLineEdit, QSlider, QMessageBox,
     QFrame, QSystemTrayIcon, QMenu, QStyle,
 )
 
@@ -38,7 +38,7 @@ HOTKEYS = [
 
 ICON_THEMES = [
     "emoji", "nerd-font", "material", "phosphor", "codicons",
-    "minimal", "dots", "arrows", "text",
+    "omarchy", "minimal", "dots", "arrows", "text",
 ]
 
 OUTPUT_MODES = ["type", "clipboard", "paste"]
@@ -54,8 +54,24 @@ def read_config():
         return tomllib.load(f)
 
 
+def _deep_merge(base: dict, overrides: dict) -> dict:
+    """Merge overrides into base, preserving keys in base that aren't in overrides."""
+    merged = base.copy()
+    for key, value in overrides.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def write_config(config: dict):
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    # Read existing config to preserve keys the GUI doesn't manage
+    existing = read_config()
+    merged = _deep_merge(existing, config)
+
     lines = []
     lines.append("# VoxType Configuration")
     lines.append("# Managed by voxtype-settings GUI\n")
@@ -77,49 +93,106 @@ def write_config(config: dict):
             return f"{{ {items} }}"
         return str(v)
 
-    for key in ["engine", "state_file"]:
-        if key in config:
-            lines.append(f'{key} = {write_value(config[key])}')
-    lines.append("")
+    def write_section(data: dict, prefix=""):
+        """Recursively write TOML sections, handling nested tables."""
+        top_level = {}
+        sub_sections = {}
+        for key, val in data.items():
+            if isinstance(val, dict) and any(isinstance(v, dict) for v in val.values()):
+                # Contains nested dicts — must be a table section
+                sub_sections[key] = val
+            elif isinstance(val, dict) and val:
+                # Flat dict — check if it has enough entries to warrant a section
+                # or if keys need quoting (like replacements with spaces)
+                has_complex_keys = any(" " in k for k in val)
+                if has_complex_keys or len(val) > 3:
+                    sub_sections[key] = val
+                else:
+                    sub_sections[key] = val
+            elif isinstance(val, dict):
+                pass  # empty dict, skip
+            else:
+                top_level[key] = val
 
-    sections = [
-        ("hotkey", ["enabled", "key", "modifiers", "mode"]),
-        ("audio", ["device", "sample_rate", "max_duration_secs"]),
-        ("audio.feedback", ["enabled", "theme", "volume"]),
-        ("whisper", [
-            "mode", "model", "language", "translate", "threads",
-            "on_demand_loading", "gpu_isolation", "context_window_optimization",
-        ]),
-        ("output", [
-            "mode", "fallback_to_clipboard", "type_delay_ms",
-            "pre_type_delay_ms", "paste_keys",
-        ]),
-        ("output.notification", [
-            "on_recording_start", "on_recording_stop", "on_transcription",
-        ]),
-        ("output.post_process", ["command", "timeout_ms"]),
-        ("text", ["spoken_punctuation", "replacements"]),
-        ("status", ["icon_theme"]),
-    ]
+        def format_key(k):
+            """Quote TOML keys that contain spaces or special characters."""
+            if " " in k or not k.replace("-", "").replace("_", "").isalnum():
+                return f'"{k}"'
+            return k
 
-    for section_name, keys in sections:
-        parts = section_name.split(".")
-        data = config
-        for part in parts:
-            data = data.get(part, {})
-            if not isinstance(data, dict):
-                data = {}
-                break
-        if not data:
-            continue
-        lines.append(f"[{section_name}]")
-        for key in keys:
-            if key in data:
-                lines.append(f"{key} = {write_value(data[key])}")
-        lines.append("")
+        for key, val in top_level.items():
+            lines.append(f"{format_key(key)} = {write_value(val)}")
+
+        for key, val in sub_sections.items():
+            section_name = f"{prefix}.{key}" if prefix else key
+            # Separate sub-table values from nested sub-tables
+            leaf_vals = {}
+            nested = {}
+            for k, v in val.items():
+                if isinstance(v, dict):
+                    nested[k] = v
+                else:
+                    leaf_vals[k] = v
+            if leaf_vals:
+                lines.append(f"\n[{section_name}]")
+                for k, v in leaf_vals.items():
+                    lines.append(f"{format_key(k)} = {write_value(v)}")
+            for k, v in nested.items():
+                nested_name = f"{section_name}.{k}"
+                lines.append(f"\n[{nested_name}]")
+                write_section(v, nested_name)
+
+    write_section(merged)
 
     with open(CONFIG_PATH, "w") as f:
         f.write("\n".join(lines) + "\n")
+
+
+def check_voxtype_health() -> list[str]:
+    """Check for common VoxType misconfigurations. Returns list of warnings."""
+    warnings = []
+
+    # Check if voxtype binary points to vulkan backend
+    voxtype_bin = Path("/usr/bin/voxtype")
+    if voxtype_bin.exists():
+        resolved = voxtype_bin.resolve()
+        if "native" in resolved.name or "cpu" in resolved.name:
+            warnings.append(
+                "VoxType is using CPU backend instead of Vulkan GPU.\n"
+                "Fix: sudo ln -sf /usr/lib/voxtype/voxtype-vulkan /usr/bin/voxtype"
+            )
+
+    # Check if transcribe-worker is available
+    config = read_config()
+    gpu_isolation = config.get("whisper", {}).get("gpu_isolation", True)
+    if gpu_isolation:
+        import shutil
+        if not shutil.which("transcribe-worker"):
+            warnings.append(
+                "GPU isolation is enabled but 'transcribe-worker' not found in PATH.\n"
+                "Fix: sudo ln -s /usr/bin/voxtype /usr/local/bin/transcribe-worker"
+            )
+
+    # Check GPU device environment in systemd drop-in
+    gpu_conf = Path.home() / ".config/systemd/user/voxtype.service.d/gpu.conf"
+    if gpu_conf.exists():
+        content = gpu_conf.read_text()
+        if "VOXTYPE_VULKAN_DEVICE" in content:
+            # Check if an NVIDIA GPU is present but config says amd/intel
+            try:
+                lspci = subprocess.run(
+                    ["lspci"], capture_output=True, text=True, timeout=5
+                )
+                has_nvidia = "nvidia" in lspci.stdout.lower()
+                if has_nvidia and "nvidia" not in content.lower():
+                    warnings.append(
+                        "NVIDIA GPU detected but VOXTYPE_VULKAN_DEVICE is not set to 'nvidia'.\n"
+                        f"Check: {gpu_conf}"
+                    )
+            except Exception:
+                pass
+
+    return warnings
 
 
 def get_daemon_status():
@@ -240,6 +313,20 @@ class VoxTypeTray(QSystemTrayIcon):
         self.refresh_state()
         self.show()
 
+        # Run health check on startup
+        self._run_health_check()
+
+    def _run_health_check(self):
+        warnings = check_voxtype_health()
+        if warnings:
+            msg = "VoxType configuration issues detected:\n\n" + "\n\n".join(warnings)
+            self.showMessage(
+                "VoxType Health Check",
+                msg,
+                QSystemTrayIcon.MessageIcon.Warning,
+                10000,
+            )
+
     def update_icon(self, state="stopped"):
         if state != self._current_state:
             self._current_state = state
@@ -286,10 +373,12 @@ class VoxTypeTray(QSystemTrayIcon):
         if get_daemon_status():
             subprocess.run(["systemctl", "--user", "stop", "voxtype"], timeout=10)
         else:
+            self._run_health_check()
             subprocess.run(["systemctl", "--user", "start", "voxtype"], timeout=10)
         QTimer.singleShot(1500, self.refresh_state)
 
     def restart_daemon(self):
+        self._run_health_check()
         subprocess.run(["systemctl", "--user", "restart", "voxtype"], timeout=10)
         QTimer.singleShot(1500, self.refresh_state)
 
@@ -522,6 +611,35 @@ class VoxTypeSettings(QMainWindow):
         self.ctx_opt.setChecked(self._get("whisper", "context_window_optimization", default=True))
         self.ctx_opt.setToolTip("Faster transcription for short clips. Disable if you get repetition.")
         form2.addRow(self.ctx_opt)
+
+        self.gpu_device = QSpinBox()
+        self.gpu_device.setRange(-1, 15)
+        self.gpu_device.setSpecialValueText("Auto")
+        gpu_dev = self._get("whisper", "gpu_device", default=-1)
+        self.gpu_device.setValue(gpu_dev if gpu_dev is not None else -1)
+        self.gpu_device.setToolTip("GPU device index for multi-GPU systems (-1 = auto)")
+        form2.addRow("GPU Device:", self.gpu_device)
+
+        self.eager_processing = QCheckBox("Eager processing (transcribe while recording)")
+        self.eager_processing.setChecked(self._get("whisper", "eager_processing", default=False))
+        self.eager_processing.setToolTip("Transcribe audio in chunks while still recording")
+        form2.addRow(self.eager_processing)
+
+        self.eager_chunk_secs = QDoubleSpinBox()
+        self.eager_chunk_secs.setRange(1.0, 30.0)
+        self.eager_chunk_secs.setSingleStep(0.5)
+        self.eager_chunk_secs.setDecimals(1)
+        self.eager_chunk_secs.setValue(float(self._get("whisper", "eager_chunk_secs", default=5.0)))
+        self.eager_chunk_secs.setSuffix(" sec")
+        form2.addRow("Eager chunk size:", self.eager_chunk_secs)
+
+        self.eager_overlap_secs = QDoubleSpinBox()
+        self.eager_overlap_secs.setRange(0.0, 5.0)
+        self.eager_overlap_secs.setSingleStep(0.1)
+        self.eager_overlap_secs.setDecimals(1)
+        self.eager_overlap_secs.setValue(float(self._get("whisper", "eager_overlap_secs", default=0.5)))
+        self.eager_overlap_secs.setSuffix(" sec")
+        form2.addRow("Eager overlap:", self.eager_overlap_secs)
         layout.addWidget(group2)
 
         layout.addStretch()
@@ -556,6 +674,14 @@ class VoxTypeSettings(QMainWindow):
         self.pre_type_delay.setSuffix(" ms")
         form.addRow("Pre-type Delay:", self.pre_type_delay)
         layout.addWidget(group)
+
+        group_text = QGroupBox("Smart Input")
+        form_text = QFormLayout(group_text)
+        self.smart_auto_submit = QCheckBox('Say "submit"/"send"/"enter" to auto-press Enter')
+        self.smart_auto_submit.setChecked(self._get("text", "smart_auto_submit", default=False))
+        self.smart_auto_submit.setToolTip("Trigger word is stripped from output text")
+        form_text.addRow(self.smart_auto_submit)
+        layout.addWidget(group_text)
 
         group2 = QGroupBox("Notifications")
         form2 = QFormLayout(group2)
@@ -655,9 +781,16 @@ class VoxTypeSettings(QMainWindow):
             subprocess.run(["systemctl", "--user", "stop", "voxtype"], timeout=10)
             self.statusBar().showMessage("Daemon stopped")
         else:
+            self._warn_health_issues()
             subprocess.run(["systemctl", "--user", "start", "voxtype"], timeout=10)
             self.statusBar().showMessage("Daemon started")
         QTimer.singleShot(1000, self.refresh_status)
+
+    def _warn_health_issues(self):
+        warnings = check_voxtype_health()
+        if warnings:
+            msg = "Configuration issues detected:\n\n" + "\n\n".join(warnings)
+            QMessageBox.warning(self, "VoxType Health Check", msg)
 
     def save_config(self):
         replacements = {}
@@ -696,6 +829,10 @@ class VoxTypeSettings(QMainWindow):
                 "on_demand_loading": self.on_demand.isChecked(),
                 "gpu_isolation": self.gpu_isolation.isChecked(),
                 "context_window_optimization": self.ctx_opt.isChecked(),
+                **({"gpu_device": self.gpu_device.value()} if self.gpu_device.value() >= 0 else {}),
+                "eager_processing": self.eager_processing.isChecked(),
+                "eager_chunk_secs": self.eager_chunk_secs.value(),
+                "eager_overlap_secs": self.eager_overlap_secs.value(),
             },
             "output": {
                 "mode": self.output_mode.currentText(),
@@ -710,6 +847,7 @@ class VoxTypeSettings(QMainWindow):
             },
             "text": {
                 "spoken_punctuation": self.spoken_punct.isChecked(),
+                "smart_auto_submit": self.smart_auto_submit.isChecked(),
             },
             "status": {
                 "icon_theme": self.icon_theme.currentText(),
@@ -730,6 +868,7 @@ class VoxTypeSettings(QMainWindow):
             write_config(config)
             self.config = config
             if get_daemon_status():
+                self._warn_health_issues()
                 subprocess.run(
                     ["systemctl", "--user", "restart", "voxtype"],
                     timeout=10,
@@ -754,6 +893,12 @@ class VoxTypeSettings(QMainWindow):
         self.on_demand.setChecked(self._get("whisper", "on_demand_loading", default=False))
         self.gpu_isolation.setChecked(self._get("whisper", "gpu_isolation", default=True))
         self.ctx_opt.setChecked(self._get("whisper", "context_window_optimization", default=True))
+        gpu_dev = self._get("whisper", "gpu_device", default=-1)
+        self.gpu_device.setValue(gpu_dev if gpu_dev is not None else -1)
+        self.eager_processing.setChecked(self._get("whisper", "eager_processing", default=False))
+        self.eager_chunk_secs.setValue(float(self._get("whisper", "eager_chunk_secs", default=5.0)))
+        self.eager_overlap_secs.setValue(float(self._get("whisper", "eager_overlap_secs", default=0.5)))
+        self.smart_auto_submit.setChecked(self._get("text", "smart_auto_submit", default=False))
         self.output_mode.setCurrentText(self._get("output", "mode", default="type"))
         self.fallback_clip.setChecked(self._get("output", "fallback_to_clipboard", default=True))
         self.type_delay.setValue(self._get("output", "type_delay_ms", default=0))
