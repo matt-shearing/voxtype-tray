@@ -15,9 +15,11 @@ optdepends=(
     'dotool: keyboard simulation for KDE Plasma Wayland (recommended)'
     'wtype: keyboard simulation for Sway/wlroots compositors'
     'wl-clipboard: clipboard fallback support'
+    'polkit: required for in-GUI backend switching and MIGraphX wrapper install'
+    'migraphx: AMD GPU acceleration for ONNX engines (Parakeet, etc.)'
 )
 source=("${pkgname}-${pkgver}.tar.gz::https://github.com/matt-shearing/${pkgname}/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('f76dacd0e73e00ca7d01c444902386f18572bb2d8b52f6fbc93f32f70f61f42f')
 
 package() {
     cd "${pkgname}-${pkgver}"
