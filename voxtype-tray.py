@@ -247,6 +247,55 @@ def get_daemon_status():
         return False
 
 
+# Human-readable description for each shipped voxtype-* daemon binary.
+# These strings are shown in the Backend group of the General tab so users
+# understand what they're switching between without consulting docs.
+BACKEND_DESCRIPTIONS = {
+    "voxtype-avx2":          ("CPU (AVX2)",        "Whisper only"),
+    "voxtype-avx512":        ("CPU (AVX-512)",     "Whisper only"),
+    "voxtype-vulkan":        ("GPU (Vulkan)",      "Whisper only"),
+    "voxtype-onnx-avx2":     ("CPU (AVX2)",        "All ONNX engines (Parakeet, Moonshine, etc.)"),
+    "voxtype-onnx-avx512":   ("CPU (AVX-512)",     "All ONNX engines (Parakeet, Moonshine, etc.)"),
+    "voxtype-onnx-cuda":     ("NVIDIA CUDA",       "All ONNX engines"),
+    "voxtype-onnx-cuda-12":  ("NVIDIA CUDA 12",    "All ONNX engines"),
+    "voxtype-onnx-cuda-13":  ("NVIDIA CUDA 13",    "All ONNX engines"),
+    "voxtype-onnx-migraphx": ("AMD GPU (MIGraphX)", "All ONNX engines (Parakeet, Moonshine, etc.)"),
+    "voxtype-onnx-rocm":     ("AMD GPU (legacy ROCm)", "All ONNX engines — deprecated, use migraphx"),
+}
+
+
+def get_current_backend() -> str:
+    """Return the basename of the binary /usr/bin/voxtype currently links to."""
+    bin_path = Path("/usr/bin/voxtype")
+    if not bin_path.exists():
+        return "unknown"
+    try:
+        return bin_path.resolve().name
+    except Exception:
+        return "unknown"
+
+
+def backend_supports_onnx(name: str) -> bool:
+    return "onnx" in name
+
+
+def detect_gpu_vendor() -> str:
+    """Return 'amd', 'nvidia', 'intel', or 'unknown'."""
+    try:
+        out = subprocess.run(
+            ["lspci"], capture_output=True, text=True, timeout=5
+        ).stdout.lower()
+        if "nvidia" in out:
+            return "nvidia"
+        if "amd/ati" in out or "radeon" in out:
+            return "amd"
+        if "intel" in out and ("vga" in out or "graphics" in out):
+            return "intel"
+    except Exception:
+        pass
+    return "unknown"
+
+
 def get_voxtype_state():
     """Read the current VoxType state (idle/recording/transcribing/stopped)."""
     try:
@@ -543,17 +592,45 @@ class VoxTypeSettings(QMainWindow):
         form2.addRow("Replacements:", self.replacements_edit)
         layout.addWidget(group2)
 
+        # Backend management — added v1.2.1 so users don't need a terminal
+        # to enable GPU acceleration or switch to the ONNX binary required
+        # for Parakeet/streaming. Both buttons elevate via pkexec.
+        backend_group = QGroupBox("VoxType Backend")
+        bv = QVBoxLayout(backend_group)
+        self.backend_status_label = QLabel()
+        self.backend_status_label.setWordWrap(True)
+        bv.addWidget(self.backend_status_label)
+
+        btn_row = QHBoxLayout()
+        self.enable_gpu_btn = QPushButton("Enable GPU acceleration")
+        self.enable_gpu_btn.setToolTip(
+            "Runs 'voxtype setup gpu --enable' (auto-picks Vulkan/CUDA/MIGraphX for your hardware). Requires authentication."
+        )
+        self.enable_gpu_btn.clicked.connect(self.enable_gpu)
+        btn_row.addWidget(self.enable_gpu_btn)
+
+        self.enable_onnx_btn = QPushButton("Enable ONNX (Parakeet, etc.)")
+        self.enable_onnx_btn.setToolTip(
+            "Runs 'voxtype setup onnx --enable' to switch to the ONNX binary, unlocking Parakeet streaming. Requires authentication."
+        )
+        self.enable_onnx_btn.clicked.connect(self.enable_onnx)
+        btn_row.addWidget(self.enable_onnx_btn)
+        bv.addLayout(btn_row)
+        layout.addWidget(backend_group)
+        self._refresh_backend_status()
+
         group3 = QGroupBox("Models")
         vl = QVBoxLayout(group3)
         installed = get_installed_models()
         self.models_label = QLabel(
             f"Installed: {', '.join(installed)}" if installed else "No models installed"
         )
+        self.models_label.setWordWrap(True)
         vl.addWidget(self.models_label)
 
         dl_layout = QHBoxLayout()
         self.dl_model_combo = QComboBox()
-        self.dl_model_combo.addItems(WHISPER_MODELS)
+        self.dl_model_combo.addItems(WHISPER_MODELS + PARAKEET_MODELS)
         dl_layout.addWidget(self.dl_model_combo)
         dl_btn = QPushButton("Download Model")
         dl_btn.clicked.connect(self.download_model)
@@ -563,6 +640,79 @@ class VoxTypeSettings(QMainWindow):
 
         layout.addStretch()
         return w
+
+    def _refresh_backend_status(self):
+        current = get_current_backend()
+        backend_label, engines = BACKEND_DESCRIPTIONS.get(
+            current, (current, "Unknown binary")
+        )
+        gpu = detect_gpu_vendor()
+        recommendation = ""
+        if gpu == "amd" and current != "voxtype-onnx-migraphx":
+            recommendation = (
+                "<br><span style='color:#b87333;'>AMD GPU detected — "
+                "switch to voxtype-onnx-migraphx (Enable GPU + Enable ONNX) "
+                "for Parakeet streaming with GPU acceleration.</span>"
+            )
+        elif gpu == "nvidia" and not current.startswith("voxtype-onnx-cuda"):
+            recommendation = (
+                "<br><span style='color:#b87333;'>NVIDIA GPU detected — "
+                "click 'Enable GPU' then 'Enable ONNX' for full acceleration.</span>"
+            )
+        self.backend_status_label.setText(
+            f"<b>Current:</b> {current}<br>"
+            f"<b>Mode:</b> {backend_label} — {engines}{recommendation}"
+        )
+
+    def _run_pkexec(self, args: list[str], success_msg: str):
+        """Run a privileged voxtype subcommand via pkexec, then restart daemon."""
+        try:
+            proc = subprocess.run(
+                ["pkexec"] + args,
+                capture_output=True, text=True, timeout=60,
+            )
+        except FileNotFoundError:
+            QMessageBox.critical(
+                self, "pkexec not found",
+                "polkit's pkexec is required to switch backends.\n"
+                "Install polkit, or run the command manually in a terminal:\n"
+                f"  sudo {' '.join(args)}"
+            )
+            return False
+        except subprocess.TimeoutExpired:
+            QMessageBox.critical(self, "Timeout", "Backend switch timed out.")
+            return False
+
+        if proc.returncode == 0:
+            self.statusBar().showMessage(success_msg)
+            self._refresh_backend_status()
+            if get_daemon_status():
+                subprocess.run(
+                    ["systemctl", "--user", "restart", "voxtype"], timeout=10
+                )
+            return True
+
+        # pkexec returns 126 when the user cancels the auth dialog
+        if proc.returncode == 126:
+            self.statusBar().showMessage("Backend switch cancelled")
+            return False
+        QMessageBox.critical(
+            self, "Backend switch failed",
+            f"Exit code {proc.returncode}\n\n{proc.stderr or proc.stdout}"
+        )
+        return False
+
+    def enable_gpu(self):
+        self._run_pkexec(
+            ["voxtype", "setup", "gpu", "--enable"],
+            "GPU acceleration enabled"
+        )
+
+    def enable_onnx(self):
+        self._run_pkexec(
+            ["voxtype", "setup", "onnx", "--enable"],
+            "ONNX engines enabled (Parakeet now available)"
+        )
 
     def _build_audio_tab(self):
         w = QWidget()
@@ -1132,10 +1282,27 @@ class VoxTypeSettings(QMainWindow):
 
     def download_model(self):
         model = self.dl_model_combo.currentText()
-        dest = MODELS_DIR / f"ggml-{model}.bin"
-        if dest.exists():
+        is_parakeet = model.startswith("parakeet-")
+
+        # Whisper uses ggml-*.bin files; Parakeet uses directories.
+        # get_installed_models() handles both, so just check that.
+        if model in get_installed_models():
             QMessageBox.information(self, "Already Installed", f"Model '{model}' is already downloaded.")
             return
+
+        # Parakeet requires the ONNX binary — give a useful error early if
+        # the user picked one before switching backends.
+        if is_parakeet and not backend_supports_onnx(get_current_backend()):
+            reply = QMessageBox.question(
+                self, "ONNX backend required",
+                f"'{model}' is a Parakeet model and requires the ONNX backend.\n"
+                "Click 'Enable ONNX (Parakeet, etc.)' first.\n\n"
+                "Proceed with download anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
 
         self.statusBar().showMessage(f"Downloading {model}... (this may take a moment)")
         QApplication.processEvents()

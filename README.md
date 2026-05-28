@@ -103,7 +103,7 @@ The app reads and writes `~/.config/voxtype/config.toml`. All settings from VoxT
 
 | Tab | Settings |
 |-----|----------|
-| **General** | Icon theme, spoken punctuation, word replacements, model downloads |
+| **General** | Icon theme, spoken punctuation, word replacements, **backend selection (GPU / ONNX)**, model downloads (Whisper + Parakeet) |
 | **Audio** | Input device, sample rate, max duration, feedback sounds |
 | **Engine** | Engine selector (whisper/parakeet/moonshine/etc), per-engine settings, **Parakeet streaming** |
 | **Output** | Output mode (type/clipboard/paste), delays, modifier-release guard, notifications, post-processing |
@@ -111,14 +111,15 @@ The app reads and writes `~/.config/voxtype/config.toml`. All settings from VoxT
 
 ### Streaming text (Parakeet)
 
-VoxType 0.7.2+ supports live cursor-anchored streaming via the Parakeet engine — text appears as you speak rather than after you stop. To enable it:
+VoxType 0.7.2+ supports live cursor-anchored streaming via the Parakeet engine — text appears as you speak rather than after you stop. End-to-end from the tray (no terminal needed):
 
-1. **Engine** tab → set *Active engine* to `parakeet`
-2. Pick a Parakeet model (download via `voxtype setup model`)
-3. Tick **Stream text live as you speak**
-4. **Hotkey** tab → mode must be `toggle` (push-to-talk is incompatible)
+1. **General** tab → click **Enable ONNX (Parakeet, etc.)** (and **Enable GPU acceleration** if you have an AMD or NVIDIA GPU). Both require pkexec authentication once.
+2. **General** tab → Models → pick a Parakeet model (e.g. `parakeet-tdt-0.6b-v3`) → **Download Model**
+3. **Engine** tab → set *Active engine* to `parakeet`
+4. Tick **Stream text live as you speak**
+5. **Hotkey** tab → mode must be `toggle` (push-to-talk is incompatible)
 
-A health check warns at startup if streaming is enabled with a conflicting engine or hotkey mode.
+The Backend group in General shows your current binary and recommends the right one for your detected GPU. Health checks at startup warn about engine/streaming/hotkey conflicts.
 
 ## Recommended Settings for NVIDIA GPUs
 

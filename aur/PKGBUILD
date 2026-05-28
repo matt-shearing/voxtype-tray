@@ -1,6 +1,6 @@
 # Maintainer: matt-shearing <matt-shearing@users.noreply.github.com>
 pkgname=voxtype-tray
-pkgver=1.2.0
+pkgver=1.2.1
 pkgrel=1
 pkgdesc="System tray app and settings GUI for VoxType voice dictation (PyQt6)"
 arch=('any')
