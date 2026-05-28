@@ -664,9 +664,23 @@ class VoxTypeSettings(QMainWindow):
         layout.addWidget(group)
 
         # Parakeet group — live text streaming (v0.7.2+)
-        pgroup = QGroupBox("Parakeet")
+        # Kept visible as a teaser when engine=whisper so the streaming
+        # feature is discoverable. _update_engine_visibility() greys the
+        # body and toggles the hint label below.
+        pgroup = QGroupBox("Parakeet (live streaming)")
         self.parakeet_group = pgroup
         pform = QFormLayout(pgroup)
+
+        self.parakeet_hint = QLabel(
+            "Switch the engine above to <b>parakeet</b> to enable these settings.\n"
+            "Streaming requires a voxtype-onnx-* binary (your current binary "
+            "may be Whisper-only — check 'voxtype setup model')."
+        )
+        self.parakeet_hint.setStyleSheet(
+            "color: #b87333; background: #2a1f0f; padding: 6px; border-radius: 4px; font-size: 11px;"
+        )
+        self.parakeet_hint.setWordWrap(True)
+        pform.addRow(self.parakeet_hint)
 
         self.parakeet_model = QComboBox()
         self.parakeet_model.addItems(PARAKEET_MODELS)
@@ -783,13 +797,25 @@ class VoxTypeSettings(QMainWindow):
         is_parakeet = engine_name == "parakeet"
         self.whisper_group.setVisible(is_whisper)
         self.whisper_perf_group.setVisible(is_whisper)
-        self.parakeet_group.setVisible(is_parakeet)
+
+        # Parakeet group stays visible for whisper too (as a teaser) so the
+        # streaming feature is discoverable. For other engines (moonshine etc.),
+        # hide it since we don't have controls for those engines yet.
+        self.parakeet_group.setVisible(is_parakeet or is_whisper)
+        self.parakeet_model.setEnabled(is_parakeet)
+        self.parakeet_streaming.setEnabled(is_parakeet)
+        self.parakeet_hint.setVisible(is_whisper)
+        # Streaming spinboxes follow both engine and checkbox state
+        self._update_streaming_visibility(self.parakeet_streaming.isChecked())
 
     def _update_streaming_visibility(self, on: bool):
         if not hasattr(self, "streaming_chunk_secs"):
             return
+        # Spinboxes only meaningful when engine=parakeet AND streaming is on
+        engine_is_parakeet = self.engine.currentText() == "parakeet"
+        active = on and engine_is_parakeet
         for w in (self.streaming_chunk_secs, self.streaming_left_context, self.streaming_right_context):
-            w.setEnabled(on)
+            w.setEnabled(active)
 
     def _build_output_tab(self):
         w = QWidget()
