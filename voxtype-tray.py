@@ -30,8 +30,24 @@ WHISPER_MODELS = [
     "medium", "medium.en", "large-v3", "large-v3-turbo",
 ]
 
+# Parakeet models per upstream v0.7.x release notes
+PARAKEET_MODELS = [
+    "parakeet-tdt-0.6b-v3",
+    "parakeet-tdt-0.6b-v3-int8",
+    "parakeet-tdt-0.6b-v2",
+    "parakeet-tdt-0.6b-v2-int8",
+]
+
+# Engines accepted by `voxtype --engine` as of 0.7.x
+ENGINES = [
+    "whisper", "parakeet", "moonshine",
+    "sensevoice", "paraformer", "dolphin", "omnilingual", "cohere",
+]
+
 HOTKEYS = [
-    "SCROLLLOCK", "PAUSE", "RIGHTALT",
+    "SCROLLLOCK", "PAUSE",
+    "RIGHTALT", "RIGHTCTRL", "RIGHTSHIFT", "RIGHTMETA",
+    "LEFTCTRL", "LEFTSHIFT", "LEFTMETA",
     "F13", "F14", "F15", "F16", "F17", "F18", "F19", "F20",
     "F21", "F22", "F23", "F24",
 ]
@@ -156,7 +172,16 @@ def check_voxtype_health() -> list[str]:
     voxtype_bin = Path("/usr/bin/voxtype")
     if voxtype_bin.exists():
         resolved = voxtype_bin.resolve()
-        if "native" in resolved.name or "cpu" in resolved.name:
+        # AMD users on VoxType 0.7.0+ should use the MIGraphX binary,
+        # which replaced the old rocm binary. The compatibility symlink
+        # `voxtype-onnx-rocm` is documented as one-release-only.
+        if "rocm" in resolved.name:
+            warnings.append(
+                "VoxType binary is the legacy ROCm build. As of 0.7.0 this was\n"
+                "renamed to MIGraphX and requires ROCm 7.x.\n"
+                "Fix: sudo ln -sf /usr/lib/voxtype/voxtype-onnx-migraphx /usr/bin/voxtype"
+            )
+        elif "native" in resolved.name or "cpu" in resolved.name:
             warnings.append(
                 "VoxType is using CPU backend instead of Vulkan GPU.\n"
                 "Fix: sudo ln -sf /usr/lib/voxtype/voxtype-vulkan /usr/bin/voxtype"
@@ -172,6 +197,22 @@ def check_voxtype_health() -> list[str]:
                 "GPU isolation is enabled but 'transcribe-worker' not found in PATH.\n"
                 "Fix: sudo ln -s /usr/bin/voxtype /usr/local/bin/transcribe-worker"
             )
+
+    # Streaming requires toggle mode (push-to-talk is incompatible per VoxType 0.7.2 notes)
+    parakeet_streaming = config.get("parakeet", {}).get("streaming", False)
+    hotkey_mode = config.get("hotkey", {}).get("mode", "toggle")
+    if parakeet_streaming and hotkey_mode == "push_to_talk":
+        warnings.append(
+            "Parakeet streaming is enabled but hotkey mode is push_to_talk.\n"
+            "Streaming requires toggle activation. Switch hotkey mode to 'toggle'."
+        )
+
+    # Streaming only works with the parakeet engine
+    if parakeet_streaming and config.get("engine", "whisper") != "parakeet":
+        warnings.append(
+            "Parakeet streaming is enabled but engine is not 'parakeet'.\n"
+            "Set engine to 'parakeet' on the Engine tab, or disable streaming."
+        )
 
     # Check GPU device environment in systemd drop-in
     gpu_conf = Path.home() / ".config/systemd/user/voxtype.service.d/gpu.conf"
@@ -437,7 +478,7 @@ class VoxTypeSettings(QMainWindow):
         tabs = QTabWidget()
         tabs.addTab(self._build_general_tab(), "General")
         tabs.addTab(self._build_audio_tab(), "Audio")
-        tabs.addTab(self._build_whisper_tab(), "Whisper")
+        tabs.addTab(self._build_engine_tab(), "Engine")
         tabs.addTab(self._build_output_tab(), "Output")
         tabs.addTab(self._build_hotkey_tab(), "Hotkey")
         layout.addWidget(tabs)
@@ -543,6 +584,11 @@ class VoxTypeSettings(QMainWindow):
         self.max_duration.setValue(self._get("audio", "max_duration_secs", default=120))
         self.max_duration.setSuffix(" sec")
         form.addRow("Max Duration:", self.max_duration)
+
+        self.pause_media = QCheckBox("Pause media players while recording")
+        self.pause_media.setChecked(self._get("audio", "pause_media", default=False))
+        self.pause_media.setToolTip("MPRIS players (Spotify, mpv, browsers) pause during recording (v0.6.6+)")
+        form.addRow(self.pause_media)
         layout.addWidget(group)
 
         group2 = QGroupBox("Feedback")
@@ -568,11 +614,33 @@ class VoxTypeSettings(QMainWindow):
         layout.addStretch()
         return w
 
-    def _build_whisper_tab(self):
+    def _build_engine_tab(self):
         w = QWidget()
         layout = QVBoxLayout(w)
 
-        group = QGroupBox("Engine")
+        # Top-level engine selector — added in v1.2.0 to support Parakeet & streaming
+        engine_group = QGroupBox("Engine")
+        engine_form = QFormLayout(engine_group)
+        self.engine = QComboBox()
+        self.engine.addItems(ENGINES)
+        current_engine = self._get("engine", default="whisper")
+        if current_engine in ENGINES:
+            self.engine.setCurrentIndex(ENGINES.index(current_engine))
+        else:
+            self.engine.setCurrentIndex(0)
+        self.engine.currentTextChanged.connect(self._update_engine_visibility)
+        engine_form.addRow("Active engine:", self.engine)
+        engine_hint = QLabel(
+            "Whisper: general-purpose, many languages.  "
+            "Parakeet: fastest, supports live streaming (English)."
+        )
+        engine_hint.setStyleSheet("color: gray; font-size: 11px;")
+        engine_hint.setWordWrap(True)
+        engine_form.addRow(engine_hint)
+        layout.addWidget(engine_group)
+
+        group = QGroupBox("Whisper")
+        self.whisper_group = group
         form = QFormLayout(group)
         self.whisper_model = QComboBox()
         self.whisper_model.addItems(WHISPER_MODELS)
@@ -595,7 +663,67 @@ class VoxTypeSettings(QMainWindow):
         form.addRow("CPU Threads:", self.whisper_threads)
         layout.addWidget(group)
 
-        group2 = QGroupBox("Performance")
+        # Parakeet group — live text streaming (v0.7.2+)
+        pgroup = QGroupBox("Parakeet")
+        self.parakeet_group = pgroup
+        pform = QFormLayout(pgroup)
+
+        self.parakeet_model = QComboBox()
+        self.parakeet_model.addItems(PARAKEET_MODELS)
+        self.parakeet_model.setEditable(True)
+        current = self._get("parakeet", "model", default="parakeet-tdt-0.6b-v3")
+        if current in PARAKEET_MODELS:
+            self.parakeet_model.setCurrentIndex(PARAKEET_MODELS.index(current))
+        else:
+            self.parakeet_model.setCurrentText(current)
+        pform.addRow("Model:", self.parakeet_model)
+
+        self.parakeet_streaming = QCheckBox("Stream text live as you speak")
+        self.parakeet_streaming.setChecked(self._get("parakeet", "streaming", default=False))
+        self.parakeet_streaming.setToolTip(
+            "Live transcription appears at the cursor as you speak (v0.7.2+).\n"
+            "Requires toggle hotkey mode — push-to-talk is incompatible."
+        )
+        self.parakeet_streaming.toggled.connect(self._update_streaming_visibility)
+        pform.addRow(self.parakeet_streaming)
+
+        self.streaming_chunk_secs = QDoubleSpinBox()
+        self.streaming_chunk_secs.setRange(0.08, 2.0)
+        self.streaming_chunk_secs.setSingleStep(0.04)
+        self.streaming_chunk_secs.setDecimals(2)
+        self.streaming_chunk_secs.setValue(
+            float(self._get("parakeet", "streaming_chunk_secs", default=0.32))
+        )
+        self.streaming_chunk_secs.setSuffix(" sec")
+        self.streaming_chunk_secs.setToolTip("Audio chunk length per streaming step")
+        pform.addRow("Chunk size:", self.streaming_chunk_secs)
+
+        self.streaming_left_context = QDoubleSpinBox()
+        self.streaming_left_context.setRange(0.0, 20.0)
+        self.streaming_left_context.setSingleStep(0.4)
+        self.streaming_left_context.setDecimals(2)
+        self.streaming_left_context.setValue(
+            float(self._get("parakeet", "streaming_left_context_secs", default=5.6))
+        )
+        self.streaming_left_context.setSuffix(" sec")
+        self.streaming_left_context.setToolTip("Past audio kept as context per step")
+        pform.addRow("Left context:", self.streaming_left_context)
+
+        self.streaming_right_context = QDoubleSpinBox()
+        self.streaming_right_context.setRange(0.0, 2.0)
+        self.streaming_right_context.setSingleStep(0.04)
+        self.streaming_right_context.setDecimals(2)
+        self.streaming_right_context.setValue(
+            float(self._get("parakeet", "streaming_right_context_secs", default=0.32))
+        )
+        self.streaming_right_context.setSuffix(" sec")
+        self.streaming_right_context.setToolTip("Lookahead audio per step (lower = lower latency)")
+        pform.addRow("Right context:", self.streaming_right_context)
+
+        layout.addWidget(pgroup)
+
+        group2 = QGroupBox("Whisper Performance")
+        self.whisper_perf_group = group2
         form2 = QFormLayout(group2)
         self.on_demand = QCheckBox("On-demand model loading")
         self.on_demand.setChecked(self._get("whisper", "on_demand_loading", default=False))
@@ -642,8 +770,26 @@ class VoxTypeSettings(QMainWindow):
         form2.addRow("Eager overlap:", self.eager_overlap_secs)
         layout.addWidget(group2)
 
+        self._update_engine_visibility(self.engine.currentText())
+        self._update_streaming_visibility(self.parakeet_streaming.isChecked())
+
         layout.addStretch()
         return w
+
+    def _update_engine_visibility(self, engine_name: str):
+        if not hasattr(self, "whisper_group"):
+            return
+        is_whisper = engine_name == "whisper"
+        is_parakeet = engine_name == "parakeet"
+        self.whisper_group.setVisible(is_whisper)
+        self.whisper_perf_group.setVisible(is_whisper)
+        self.parakeet_group.setVisible(is_parakeet)
+
+    def _update_streaming_visibility(self, on: bool):
+        if not hasattr(self, "streaming_chunk_secs"):
+            return
+        for w in (self.streaming_chunk_secs, self.streaming_left_context, self.streaming_right_context):
+            w.setEnabled(on)
 
     def _build_output_tab(self):
         w = QWidget()
@@ -673,6 +819,26 @@ class VoxTypeSettings(QMainWindow):
         self.pre_type_delay.setValue(self._get("output", "pre_type_delay_ms", default=50))
         self.pre_type_delay.setSuffix(" ms")
         form.addRow("Pre-type Delay:", self.pre_type_delay)
+
+        # Modifier-release guard — defaults on in 0.7.2+, expose for users who
+        # need to disable it (e.g. for chord-style hotkeys)
+        self.wait_modifier_release = QCheckBox("Wait for modifier-key release before typing")
+        self.wait_modifier_release.setChecked(
+            self._get("output", "wait_for_modifier_release", default=True)
+        )
+        self.wait_modifier_release.setToolTip(
+            "Prevents your hotkey modifiers from combining with the typed text (v0.7.2+)"
+        )
+        form.addRow(self.wait_modifier_release)
+
+        self.modifier_release_timeout = QSpinBox()
+        self.modifier_release_timeout.setRange(50, 5000)
+        self.modifier_release_timeout.setSingleStep(50)
+        self.modifier_release_timeout.setValue(
+            self._get("output", "modifier_release_timeout_ms", default=750)
+        )
+        self.modifier_release_timeout.setSuffix(" ms")
+        form.addRow("Modifier wait timeout:", self.modifier_release_timeout)
         layout.addWidget(group)
 
         group_text = QGroupBox("Smart Input")
@@ -803,7 +969,7 @@ class VoxTypeSettings(QMainWindow):
                     replacements[k.strip()] = v.strip()
 
         config = {
-            "engine": "whisper",
+            "engine": self.engine.currentText(),
             "state_file": "auto",
             "hotkey": {
                 "enabled": self.hotkey_enabled.isChecked(),
@@ -815,6 +981,7 @@ class VoxTypeSettings(QMainWindow):
                 "device": self.audio_device.text(),
                 "sample_rate": self.sample_rate.value(),
                 "max_duration_secs": self.max_duration.value(),
+                "pause_media": self.pause_media.isChecked(),
                 "feedback": {
                     "enabled": self.feedback_enabled.isChecked(),
                     "theme": self.feedback_theme.currentText(),
@@ -834,11 +1001,20 @@ class VoxTypeSettings(QMainWindow):
                 "eager_chunk_secs": self.eager_chunk_secs.value(),
                 "eager_overlap_secs": self.eager_overlap_secs.value(),
             },
+            "parakeet": {
+                "model": self.parakeet_model.currentText(),
+                "streaming": self.parakeet_streaming.isChecked(),
+                "streaming_chunk_secs": self.streaming_chunk_secs.value(),
+                "streaming_left_context_secs": self.streaming_left_context.value(),
+                "streaming_right_context_secs": self.streaming_right_context.value(),
+            },
             "output": {
                 "mode": self.output_mode.currentText(),
                 "fallback_to_clipboard": self.fallback_clip.isChecked(),
                 "type_delay_ms": self.type_delay.value(),
                 "pre_type_delay_ms": self.pre_type_delay.value(),
+                "wait_for_modifier_release": self.wait_modifier_release.isChecked(),
+                "modifier_release_timeout_ms": self.modifier_release_timeout.value(),
                 "notification": {
                     "on_recording_start": self.notif_start.isChecked(),
                     "on_recording_stop": self.notif_stop.isChecked(),
@@ -883,9 +1059,13 @@ class VoxTypeSettings(QMainWindow):
         self.config = read_config()
         self.icon_theme.setCurrentText(self._get("status", "icon_theme", default="emoji"))
         self.spoken_punct.setChecked(self._get("text", "spoken_punctuation", default=False))
+        engine = self._get("engine", default="whisper")
+        if engine in ENGINES:
+            self.engine.setCurrentIndex(ENGINES.index(engine))
         self.audio_device.setText(self._get("audio", "device", default="default"))
         self.sample_rate.setValue(self._get("audio", "sample_rate", default=16000))
         self.max_duration.setValue(self._get("audio", "max_duration_secs", default=120))
+        self.pause_media.setChecked(self._get("audio", "pause_media", default=False))
         self.whisper_model.setCurrentText(self._get("whisper", "model", default="small.en"))
         self.whisper_lang.setText(self._get("whisper", "language", default="en"))
         self.whisper_translate.setChecked(self._get("whisper", "translate", default=False))
@@ -898,11 +1078,18 @@ class VoxTypeSettings(QMainWindow):
         self.eager_processing.setChecked(self._get("whisper", "eager_processing", default=False))
         self.eager_chunk_secs.setValue(float(self._get("whisper", "eager_chunk_secs", default=5.0)))
         self.eager_overlap_secs.setValue(float(self._get("whisper", "eager_overlap_secs", default=0.5)))
+        self.parakeet_model.setCurrentText(self._get("parakeet", "model", default="parakeet-tdt-0.6b-v3"))
+        self.parakeet_streaming.setChecked(self._get("parakeet", "streaming", default=False))
+        self.streaming_chunk_secs.setValue(float(self._get("parakeet", "streaming_chunk_secs", default=0.32)))
+        self.streaming_left_context.setValue(float(self._get("parakeet", "streaming_left_context_secs", default=5.6)))
+        self.streaming_right_context.setValue(float(self._get("parakeet", "streaming_right_context_secs", default=0.32)))
         self.smart_auto_submit.setChecked(self._get("text", "smart_auto_submit", default=False))
         self.output_mode.setCurrentText(self._get("output", "mode", default="type"))
         self.fallback_clip.setChecked(self._get("output", "fallback_to_clipboard", default=True))
         self.type_delay.setValue(self._get("output", "type_delay_ms", default=0))
         self.pre_type_delay.setValue(self._get("output", "pre_type_delay_ms", default=50))
+        self.wait_modifier_release.setChecked(self._get("output", "wait_for_modifier_release", default=True))
+        self.modifier_release_timeout.setValue(self._get("output", "modifier_release_timeout_ms", default=750))
         self.hotkey_enabled.setChecked(self._get("hotkey", "enabled", default=True))
         self.hotkey_key.setCurrentText(self._get("hotkey", "key", default="SCROLLLOCK"))
         self.hotkey_mode.setCurrentText(self._get("hotkey", "mode", default="toggle"))
@@ -913,6 +1100,8 @@ class VoxTypeSettings(QMainWindow):
         self.notif_start.setChecked(self._get("output", "notification", "on_recording_start", default=True))
         self.notif_stop.setChecked(self._get("output", "notification", "on_recording_stop", default=False))
         self.notif_transcription.setChecked(self._get("output", "notification", "on_transcription", default=True))
+        self._update_engine_visibility(self.engine.currentText())
+        self._update_streaming_visibility(self.parakeet_streaming.isChecked())
         self.statusBar().showMessage("Config reloaded")
 
     def download_model(self):

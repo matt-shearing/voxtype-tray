@@ -16,7 +16,9 @@ VoxType ships as a CLI daemon with a TOML config file. This app adds a proper GU
 - **System tray icon** with color-coded state (green=idle, red=recording, amber=transcribing, gray=stopped)
 - **Left-click** to toggle recording
 - **Right-click menu** for daemon control (start/stop/restart), settings, and recording toggle
-- **Full settings editor** with tabs for General, Audio, Whisper, Output, and Hotkey configuration
+- **Full settings editor** with tabs for General, Audio, Engine, Output, and Hotkey configuration
+- **Engine selector** for Whisper, Parakeet, and other VoxType 0.7+ engines
+- **Parakeet text streaming** — toggle live cursor-anchored streaming, tune chunk/context sizes
 - **Model management** — download Whisper models directly from the GUI
 - **Daemon control** — start, stop, and restart the systemd user service
 - **Auto-saves and restarts** the daemon when settings change
@@ -34,7 +36,7 @@ This tray app solves all of that with a native-feeling KDE experience.
 
 ## Requirements
 
-- **VoxType** 0.6+ installed and configured
+- **VoxType** 0.7+ installed and configured (streaming requires 0.7.2+)
 - **Python** 3.11+
 - **PyQt6** (`pacman -S python-pyqt6` on Arch)
 - **dotool** (for KDE Plasma Wayland — `wtype` won't work)
@@ -103,9 +105,20 @@ The app reads and writes `~/.config/voxtype/config.toml`. All settings from VoxT
 |-----|----------|
 | **General** | Icon theme, spoken punctuation, word replacements, model downloads |
 | **Audio** | Input device, sample rate, max duration, feedback sounds |
-| **Whisper** | Model selection, language, threads, GPU isolation, context optimization |
-| **Output** | Output mode (type/clipboard/paste), delays, notifications, post-processing |
+| **Engine** | Engine selector (whisper/parakeet/moonshine/etc), per-engine settings, **Parakeet streaming** |
+| **Output** | Output mode (type/clipboard/paste), delays, modifier-release guard, notifications, post-processing |
 | **Hotkey** | Enable/disable, key selection, mode (toggle/push-to-talk) |
+
+### Streaming text (Parakeet)
+
+VoxType 0.7.2+ supports live cursor-anchored streaming via the Parakeet engine — text appears as you speak rather than after you stop. To enable it:
+
+1. **Engine** tab → set *Active engine* to `parakeet`
+2. Pick a Parakeet model (download via `voxtype setup model`)
+3. Tick **Stream text live as you speak**
+4. **Hotkey** tab → mode must be `toggle` (push-to-talk is incompatible)
+
+A health check warns at startup if streaming is enabled with a conflicting engine or hotkey mode.
 
 ## Recommended Settings for NVIDIA GPUs
 
