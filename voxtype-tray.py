@@ -214,6 +214,34 @@ def check_voxtype_health() -> list[str]:
             "Set engine to 'parakeet' on the Engine tab, or disable streaming."
         )
 
+    # MIGraphX/CUDA provider lookup failure (upstream voxtype#443).
+    # Detect from recent log entries and offer the in-GUI wrapper fix.
+    if (backend_supports_onnx(get_current_backend())
+            and not voxtype_bin_is_wrapper()
+            and provider_lookup_failed_recently()):
+        warnings.append(
+            "ONNX provider failed to load — VoxType is silently running on CPU.\n"
+            "This is upstream voxtype#443 (argv[0]-based .so lookup).\n"
+            "Fix: click 'Fix MIGraphX library path' on the General tab,\n"
+            "which installs a wrapper script at /usr/bin/voxtype."
+        )
+
+    # Parakeet streaming requires tokenizer.model (upstream voxtype#442).
+    # Without it the daemon fails to start; with a mismatched one it crashes
+    # at first chunk with a Gather-node out-of-range error.
+    parakeet_model_name = config.get("parakeet", {}).get("model", "")
+    if parakeet_streaming and parakeet_model_name:
+        model_dir = (
+            Path.home() / ".local/share/voxtype/models" / parakeet_model_name
+        )
+        tokenizer = model_dir / "tokenizer.model"
+        if model_dir.is_dir() and not tokenizer.exists():
+            warnings.append(
+                f"Parakeet streaming is enabled but {tokenizer} is missing.\n"
+                "Upstream voxtype#442 — the model downloader doesn't fetch it.\n"
+                "Workaround: set [parakeet] streaming = false until upstream ships a fix."
+            )
+
     # Check GPU device environment in systemd drop-in
     gpu_conf = Path.home() / ".config/systemd/user/voxtype.service.d/gpu.conf"
     if gpu_conf.exists():
@@ -277,6 +305,58 @@ def get_current_backend() -> str:
 
 def backend_supports_onnx(name: str) -> bool:
     return "onnx" in name
+
+
+def voxtype_bin_is_wrapper() -> bool:
+    """True when /usr/bin/voxtype is a shell script (the workaround for upstream
+    voxtype#443), False when it's a direct symlink to a binary."""
+    bin_path = Path("/usr/bin/voxtype")
+    if not bin_path.exists():
+        return False
+    try:
+        with open(bin_path, "rb") as f:
+            head = f.read(4)
+        return head.startswith(b"#!")
+    except Exception:
+        return False
+
+
+# Wrapper script content. Installed in place of /usr/bin/voxtype to work around
+# the argv[0]-based provider-library lookup in ORT (see voxtype upstream #443).
+# Probes the installed variants in order: GPU-first (MIGraphX, CUDA, Vulkan),
+# then CPU ONNX, then CPU Whisper. Always exec's the real binary so argv[0]
+# resolves into the binary's own directory, where the .so files live.
+WRAPPER_SCRIPT = """#!/bin/sh
+# Installed by voxtype-tray as a workaround for voxtype upstream #443.
+# Re-execs the real variant binary so ORT's argv[0]-based provider lookup
+# finds libonnxruntime_providers_*.so in the same directory.
+target="$(readlink -f /usr/lib/voxtype/voxtype-onnx-migraphx 2>/dev/null \\
+  || readlink -f /usr/lib/voxtype/voxtype-onnx-cuda-13 2>/dev/null \\
+  || readlink -f /usr/lib/voxtype/voxtype-onnx-cuda-12 2>/dev/null \\
+  || readlink -f /usr/lib/voxtype/voxtype-vulkan 2>/dev/null \\
+  || readlink -f /usr/lib/voxtype/voxtype-onnx-avx512 2>/dev/null \\
+  || readlink -f /usr/lib/voxtype/voxtype-avx512 2>/dev/null)"
+if [ -z "$target" ] || [ ! -x "$target" ]; then
+  echo "voxtype-wrapper: no voxtype variant found under /usr/lib/voxtype/" >&2
+  exit 1
+fi
+exec "$target" "$@"
+"""
+
+
+def provider_lookup_failed_recently() -> bool:
+    """Scan recent voxtype journal entries for the ORT provider-lookup failure.
+    This is the signature of upstream voxtype#443 — the daemon falls back to CPU
+    silently, so we have to look for the log entry rather than process state."""
+    try:
+        result = subprocess.run(
+            ["journalctl", "--user", "-u", "voxtype",
+             "--since", "10 minutes ago", "--no-pager", "-q"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return False
+    return "libonnxruntime_providers_shared.so" in result.stdout
 
 
 def detect_gpu_vendor() -> str:
@@ -616,6 +696,19 @@ class VoxTypeSettings(QMainWindow):
         self.enable_onnx_btn.clicked.connect(self.enable_onnx)
         btn_row.addWidget(self.enable_onnx_btn)
         bv.addLayout(btn_row)
+
+        # Wrapper-fix button — hidden unless needed (upstream voxtype#443).
+        # Visibility is controlled by _refresh_backend_status() so the button
+        # only appears when we detect the provider-lookup failure or when the
+        # /usr/bin/voxtype symlink would benefit from being replaced.
+        self.fix_migraphx_btn = QPushButton("Fix MIGraphX library path (voxtype#443)")
+        self.fix_migraphx_btn.setToolTip(
+            "Replaces the /usr/bin/voxtype symlink with a wrapper script so ORT can "
+            "find its provider libraries. Workaround for upstream voxtype#443. "
+            "Requires authentication."
+        )
+        self.fix_migraphx_btn.clicked.connect(self.fix_migraphx_wrapper)
+        bv.addWidget(self.fix_migraphx_btn)
         layout.addWidget(backend_group)
         self._refresh_backend_status()
 
@@ -647,8 +740,26 @@ class VoxTypeSettings(QMainWindow):
             current, (current, "Unknown binary")
         )
         gpu = detect_gpu_vendor()
+        is_wrapper = voxtype_bin_is_wrapper()
+        provider_broken = (
+            backend_supports_onnx(current)
+            and not is_wrapper
+            and provider_lookup_failed_recently()
+        )
+
         recommendation = ""
-        if gpu == "amd" and current != "voxtype-onnx-migraphx":
+        if provider_broken:
+            recommendation = (
+                "<br><span style='color:#d94545;'>ONNX provider library "
+                "lookup is failing — daemon is silently using CPU fallback. "
+                "Click 'Fix MIGraphX library path' below.</span>"
+            )
+        elif is_wrapper:
+            recommendation = (
+                "<br><span style='color:#4caf50;'>Wrapper script installed "
+                "(voxtype#443 workaround active).</span>"
+            )
+        elif gpu == "amd" and current != "voxtype-onnx-migraphx":
             recommendation = (
                 "<br><span style='color:#b87333;'>AMD GPU detected — "
                 "switch to voxtype-onnx-migraphx (Enable GPU + Enable ONNX) "
@@ -663,6 +774,10 @@ class VoxTypeSettings(QMainWindow):
             f"<b>Current:</b> {current}<br>"
             f"<b>Mode:</b> {backend_label} — {engines}{recommendation}"
         )
+        # Only surface the wrapper-install button when it would actually help.
+        self.fix_migraphx_btn.setVisible(provider_broken or (
+            backend_supports_onnx(current) and not is_wrapper
+        ))
 
     def _run_pkexec(self, args: list[str], success_msg: str):
         """Run a privileged voxtype subcommand via pkexec, then restart daemon."""
@@ -713,6 +828,49 @@ class VoxTypeSettings(QMainWindow):
             ["voxtype", "setup", "onnx", "--enable"],
             "ONNX engines enabled (Parakeet now available)"
         )
+
+    def fix_migraphx_wrapper(self):
+        """Install a wrapper script at /usr/bin/voxtype to work around
+        upstream voxtype#443 (ORT provider lookup uses argv[0])."""
+        import tempfile
+        confirm = QMessageBox.question(
+            self, "Install voxtype wrapper?",
+            "This replaces /usr/bin/voxtype with a small shell wrapper that exec's "
+            "the real binary directly. It's a workaround for upstream voxtype#443 — "
+            "without it, ONNX provider libraries fail to load and the daemon falls "
+            "back to CPU silently.\n\n"
+            "The wrapper auto-detects which variant is installed (MIGraphX, CUDA, "
+            "Vulkan, etc.) so it survives future 'voxtype setup gpu' changes.\n\n"
+            "Continue? (Requires admin authentication.)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        # Write wrapper to a temp file that pkexec can read as root
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".sh", delete=False, prefix="voxtype-wrapper-"
+        ) as tmp:
+            tmp.write(WRAPPER_SCRIPT)
+            tmp_path = tmp.name
+
+        try:
+            ok = self._run_pkexec(
+                ["install", "-m755", tmp_path, "/usr/bin/voxtype"],
+                "Wrapper installed (voxtype#443 workaround active)",
+            )
+            if ok:
+                # Force-restart daemon so it picks up the new entry point
+                if get_daemon_status():
+                    subprocess.run(
+                        ["systemctl", "--user", "restart", "voxtype"], timeout=10
+                    )
+        finally:
+            try:
+                Path(tmp_path).unlink()
+            except Exception:
+                pass
 
     def _build_audio_tab(self):
         w = QWidget()
