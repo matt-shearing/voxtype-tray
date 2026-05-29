@@ -1,7 +1,7 @@
 pkgbase = voxtype-tray
 	pkgdesc = System tray app and settings GUI for VoxType voice dictation (PyQt6)
-	pkgver = 1.1.0
-	pkgrel = 1
+	pkgver = 1.2.2
+	pkgrel = 2
 	url = https://github.com/matt-shearing/voxtype-tray
 	arch = any
 	license = MIT
@@ -11,7 +11,9 @@ pkgbase = voxtype-tray
 	optdepends = dotool: keyboard simulation for KDE Plasma Wayland (recommended)
 	optdepends = wtype: keyboard simulation for Sway/wlroots compositors
 	optdepends = wl-clipboard: clipboard fallback support
-	source = voxtype-tray-1.1.0.tar.gz::https://github.com/matt-shearing/voxtype-tray/archive/refs/tags/v1.1.0.tar.gz
-	sha256sums = 150f7da7a2cea7c9348cd13f56efb339200a08a06a1722b40e99e06ac74c359f
+	optdepends = polkit: required for in-GUI backend switching and MIGraphX wrapper install
+	optdepends = migraphx: AMD GPU acceleration for ONNX engines (Parakeet, etc.)
+	source = voxtype-tray-1.2.2.tar.gz::https://github.com/matt-shearing/voxtype-tray/archive/refs/tags/v1.2.2.tar.gz
+	sha256sums = f76dacd0e73e00ca7d01c444902386f18572bb2d8b52f6fbc93f32f70f61f42f
 
 pkgname = voxtype-tray
