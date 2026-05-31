@@ -123,7 +123,11 @@ VoxType 0.7.5+ supports live cursor-anchored streaming via the Parakeet engine �
 
 The Backend group in General shows your current binary and recommends the right one for your detected GPU. Health checks at startup warn about engine/streaming/hotkey conflicts.
 
-## Recommended Settings for NVIDIA GPUs
+## GPU Acceleration
+
+The easiest path is the **General** tab → **Enable GPU acceleration** button, which runs the right `voxtype setup gpu` command for your detected GPU and restarts the daemon. The notes below cover the per-vendor specifics and manual equivalents.
+
+### NVIDIA GPUs
 
 If you have an NVIDIA GPU with Vulkan support:
 
@@ -136,6 +140,37 @@ sudo voxtype setup gpu --enable
 ```
 
 For laptops with hybrid graphics, enable "GPU memory isolation" in the Whisper tab to let the dGPU sleep between transcriptions.
+
+### AMD GPUs (ROCm / MIGraphX)
+
+AMD acceleration for the ONNX engines (Parakeet, etc.) runs through the **MIGraphX** execution provider. Once warmed up it's dramatically faster than CPU — on a typical setup, a few-second utterance transcribes in well under a second after the first run.
+
+The fastest route is the GUI: **General** tab → **Enable ONNX (Parakeet, etc.)**, then **Enable GPU acceleration**. If anything is missing, the tray's health check flags it and offers a one-click **Fix MIGraphX library path** button. The manual equivalents:
+
+```bash
+# 1. The MIGraphX runtime library is a SEPARATE package from the ROCm stack.
+#    rocm-hip-runtime alone is NOT enough — you need libmigraphx_c.so.3:
+sudo pacman -S migraphx
+
+# 2. Point the ONNX backend at the AMD GPU build:
+sudo voxtype setup onnx --enable
+sudo voxtype setup gpu --enable
+```
+
+A few AMD-specific gotchas worth knowing:
+
+- **`/usr/bin/voxtype` must be a wrapper script, not a plain symlink.** ONNX Runtime locates its provider libraries relative to the binary's own directory, so a bare symlink makes the MIGraphX provider fail to load (it looks in `/usr/bin/` instead of the variant dir). VoxType 0.7.5+ installs a proper wrapper automatically; on older versions the tray's **Fix MIGraphX library path** button installs one for you. (See upstream [voxtype#443](https://github.com/peteonrails/voxtype/issues/443).)
+- **A package upgrade can reset that symlink** back to a CPU build. If GPU dictation suddenly stops after an update, re-run **Enable GPU acceleration** (or the Fix button) to restore the wrapper.
+- **MIGraphX needs a writable kernel-cache directory.** Without it, the first inference errors out trying to write its compiled kernels. Set it via a systemd user drop-in (`~/.config/systemd/user/voxtype.service.d/migraphx-cache.conf`):
+
+  ```ini
+  [Service]
+  Environment="ORT_MIGRAPHX_CACHE_PATH=%h/.cache/migraphx"
+  Environment="ORT_MIGRAPHX_MODEL_CACHE_PATH=%h/.cache/migraphx-models"
+  Environment="HIP_VISIBLE_DEVICES=0"
+  ```
+
+  Then `systemctl --user daemon-reload && systemctl --user restart voxtype`. The first transcription after a model change will be slow while kernels compile and cache; subsequent runs are fast.
 
 ## License
 
