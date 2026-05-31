@@ -81,6 +81,35 @@ def _deep_merge(base: dict, overrides: dict) -> dict:
     return merged
 
 
+# TOML basic-string escapes (https://toml.io/en/v1.0.0#string). Without these,
+# a value containing a double-quote — e.g. a post-process command like
+#   bash -c '{ echo -n "Transcribed: "; cat; }'
+# — terminates the string early and corrupts the whole config file (#2).
+_TOML_ESCAPES = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\n": "\\n",
+    "\r": "\\r",
+    "\t": "\\t",
+    "\b": "\\b",
+    "\f": "\\f",
+}
+
+
+def _toml_quote(s: str) -> str:
+    """Render a Python str as a quoted, fully-escaped TOML basic string."""
+    out = []
+    for ch in s:
+        esc = _TOML_ESCAPES.get(ch)
+        if esc is not None:
+            out.append(esc)
+        elif ord(ch) < 0x20:
+            out.append(f"\\u{ord(ch):04X}")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+
 def write_config(config: dict):
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
@@ -100,12 +129,12 @@ def write_config(config: dict):
         elif isinstance(v, float):
             return str(v)
         elif isinstance(v, str):
-            return f'"{v}"'
+            return _toml_quote(v)
         elif isinstance(v, list):
             items = ", ".join(write_value(i) for i in v)
             return f"[{items}]"
         elif isinstance(v, dict):
-            items = ", ".join(f'"{k}" = {write_value(val)}' for k, val in v.items())
+            items = ", ".join(f"{_toml_quote(str(k))} = {write_value(val)}" for k, val in v.items())
             return f"{{ {items} }}"
         return str(v)
 
@@ -133,7 +162,7 @@ def write_config(config: dict):
         def format_key(k):
             """Quote TOML keys that contain spaces or special characters."""
             if " " in k or not k.replace("-", "").replace("_", "").isalnum():
-                return f'"{k}"'
+                return _toml_quote(k)
             return k
 
         for key, val in top_level.items():
@@ -159,9 +188,23 @@ def write_config(config: dict):
                 write_section(v, nested_name)
 
     write_section(merged)
+    text = "\n".join(lines) + "\n"
 
-    with open(CONFIG_PATH, "w") as f:
-        f.write("\n".join(lines) + "\n")
+    # Validate before touching disk: re-parse what we're about to write so a
+    # serialization gap can never leave a corrupt config behind (#2).
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(
+            f"Refusing to save: generated config is not valid TOML ({e}). "
+            "Your existing config was left untouched."
+        ) from e
+
+    # Atomic replace so an interrupted write can't truncate the live file.
+    tmp_path = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".tmp")
+    with open(tmp_path, "w") as f:
+        f.write(text)
+    os.replace(tmp_path, CONFIG_PATH)
 
 
 def check_voxtype_health() -> list[str]:
