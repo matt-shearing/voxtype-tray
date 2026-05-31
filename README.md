@@ -18,7 +18,7 @@ VoxType ships as a CLI daemon with a TOML config file. This app adds a proper GU
 - **Right-click menu** for daemon control (start/stop/restart), settings, and recording toggle
 - **Full settings editor** with tabs for General, Audio, Engine, Output, and Hotkey configuration
 - **Engine selector** for Whisper, Parakeet, and other VoxType 0.7+ engines
-- **Parakeet text streaming** — toggle live cursor-anchored streaming, tune chunk/context sizes
+- **Parakeet text streaming** — toggle live cursor-anchored streaming (requires the `parakeet-unified-en-0.6b` model + VoxType 0.7.5+), tune chunk/context sizes
 - **Model management** — download Whisper models directly from the GUI
 - **Daemon control** — start, stop, and restart the systemd user service
 - **Auto-saves and restarts** the daemon when settings change
@@ -36,7 +36,7 @@ This tray app solves all of that with a native-feeling KDE experience.
 
 ## Requirements
 
-- **VoxType** 0.7+ installed and configured (streaming requires 0.7.2+)
+- **VoxType** 0.7+ installed and configured (Parakeet streaming requires 0.7.5+)
 - **Python** 3.11+
 - **PyQt6** (`pacman -S python-pyqt6` on Arch)
 - **dotool** (for KDE Plasma Wayland — `wtype` won't work)
@@ -111,13 +111,15 @@ The app reads and writes `~/.config/voxtype/config.toml`. All settings from VoxT
 
 ### Streaming text (Parakeet)
 
-VoxType 0.7.2+ supports live cursor-anchored streaming via the Parakeet engine — text appears as you speak rather than after you stop. End-to-end from the tray (no terminal needed):
+VoxType 0.7.5+ supports live cursor-anchored streaming via the Parakeet engine — text appears as you speak rather than after you stop. End-to-end from the tray (no terminal needed):
 
 1. **General** tab → click **Enable ONNX (Parakeet, etc.)** (and **Enable GPU acceleration** if you have an AMD or NVIDIA GPU). Both require pkexec authentication once.
-2. **General** tab → Models → pick a Parakeet model (e.g. `parakeet-tdt-0.6b-v3`) → **Download Model**
-3. **Engine** tab → set *Active engine* to `parakeet`
+2. **General** tab → Models → pick **`parakeet-unified-en-0.6b`** → **Download Model**
+3. **Engine** tab → set *Active engine* to `parakeet` and select `parakeet-unified-en-0.6b` as the model
 4. Tick **Stream text live as you speak**
 5. **Hotkey** tab → mode must be `toggle` (push-to-talk is incompatible)
+
+> **Which model?** Streaming needs the purpose-built **`parakeet-unified-en-0.6b`** model. The general-purpose `parakeet-tdt-0.6b-v3` (and other TDT models) are excellent for normal batch dictation but **do not support streaming** — enabling streaming with one of those will fail at the daemon. VoxType 0.7.5+ auto-switches to the unified model when you turn streaming on; this tray surfaces the same requirement in its health checks.
 
 The Backend group in General shows your current binary and recommends the right one for your detected GPU. Health checks at startup warn about engine/streaming/hotkey conflicts.
 
