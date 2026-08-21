@@ -1,8 +1,13 @@
 # VoxType Tray
 
-A lightweight PyQt6 system tray application for [VoxType](https://github.com/peteonrails/voxtype) — the push-to-talk voice-to-text tool for Linux.
+A GUI for [VoxType](https://github.com/peteonrails/voxtype) — the push-to-talk voice-to-text tool for Linux.
 
-VoxType ships as a CLI daemon with a TOML config file. This app adds a proper GUI: a system tray icon with live status, quick controls, and a full settings editor.
+On **Omarchy / Hyprland**, use the native bar applet
+[`omarchy-voxtype`](https://github.com/matt-shearing/omarchy-voxtype): a
+Quickshell chip with live recording state, daemon control, and a door into
+`voxtype configure`. The PyQt6 system tray below is the KDE Plasma app.
+
+VoxType ships as a CLI daemon with a TOML config file. The Plasma tray adds a system tray icon with live status, quick controls, and a full settings editor.
 
 ![Python](https://img.shields.io/badge/python-3.11+-blue) ![PyQt6](https://img.shields.io/badge/PyQt6-required-green) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
